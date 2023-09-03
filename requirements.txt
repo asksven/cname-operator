@@ -1,0 +1,5 @@
+kopf
+#pykube-ng
+pyyaml
+azure-mgmt-dns
+azure.identity
