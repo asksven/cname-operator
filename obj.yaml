@@ -4,7 +4,7 @@ kind: Ingress
 metadata:
   name: kopf-example-2
   annotations:
-    cname: blog.asksven.io
+    cnames: foo.ext.stg.asksven.io=blog.asksven.io
 spec:
   ingressClassName: nginx-example
   rules:

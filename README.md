@@ -8,7 +8,7 @@ kind: Ingress
 metadata:
   name: kopf-example-2
   annotations:
-    cname: blog.asksven.io
+    cnames: blog.asksven.io=cname1,foo.asksven.io=cname2
 ```
 
 ## Run
