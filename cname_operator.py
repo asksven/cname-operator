@@ -16,6 +16,23 @@ ttl = os.getenv("RECORD_TTL")
 cname_domain=os.getenv("CNAME_DOMAIN")
 host_domain=os.getenv("HOST_DOMAIN")
 
+# This functions returns the valid tuples <hostname>=<cname> from the annotation
+# Invalid tuples are ignored
+def get_cnames(logger, annotation):
+    cnames = dict()
+    logger.debug("Getting host:keyname from {v}".format(v=annotation))
+    tuples = annotation.replace(" ", "").split(",")
+    for tuple in tuples:
+        logger.debug("splitting tuple {t}".format(t=tuple))
+        keyvalue = tuple.split("=")
+        if len(keyvalue) == 2:
+            logger.debug("Key \'{k}\', value \'{v}\'".format(k=keyvalue[0], v=keyvalue[1]))
+            cnames[keyvalue[0]]=keyvalue[1]
+        else:
+            logger.error("Tuple is invalid and will be ignored: {t}".format(t=tuple))
+    logger.info("tuples from annotation {a}: {t}".format(a=annotation, t=cnames))            
+    return cnames
+
 # this function normalizes the hostname to the DNSZone's domain
 # e.g. hostname = foo.baz.bar
 # and dns_zone = bar
@@ -98,74 +115,85 @@ def check_if_host_valid(host, logger):
 
 ####### Operator #######
 @kopf.on.create(kind='Ingress',
-                annotations={'cname': kopf.PRESENT})
+                annotations={'cnames': kopf.PRESENT})
 async def create_with_annotations_present(logger, new, **kwargs):
     logger.info("Annotation is present, object is {v}".format(v=new))
 
-    cname=new['metadata']['annotations']['cname']
+    cnames=new['metadata']['annotations']['cnames']
 
-    logger.info("Ingress was created with cname-annotation. Value is {v}".format(v=cname))
-    if check_if_cname_valid(cname, logger):
-        logger.info("Creating/updating cname")
-        
-        hosts = get_hosts_from_ingress(new, logger)
-        # create all cnames fo valid hosts
-        applied_hosts = []
-        for entry in hosts:
-            if check_if_host_valid(entry, logger):
-                # update
-                create_or_update_cname(logger=logger, host=entry, cname=cname)
-                applied_hosts.append(entry)
+    logger.info("Ingress was created with cnames-annotation. Value is {v}".format(v=cnames))
+    tuples = get_cnames(logger, cnames)
+    for hostname in tuples:
+        #print("key: \'{k}\', value \'{v}\'".format(k=key, v=res[key]))
+        if check_if_cname_valid(tuples[hostname], logger):
+            logger.info("Creating/updating cname")
+            
+            hosts = get_hosts_from_ingress(new, logger)
+            # create all cnames fo valid hosts that are in the annotation and in the ingress
+            applied_hosts = []
+            if check_if_host_valid(hostname, logger):
+                if hostname in hosts:
+                    # update
+                    create_or_update_cname(logger=logger, host=hostname, cname=tuples[hostname])
+                    applied_hosts.append(hostname)
+                else:
+                    logger.error("hostname {h} is not in {hs}".format(h=hostname, hs=hosts))    
             else:
-                logger.error("Hostname {host} did not get applied because it did not match {r}".format(host=entry, r=host_domain))    
-        return {'status': "Applied hosts: {hosts}".format(hosts=applied_hosts)}    
-    else:
-        logger.error("CNAME {c} did not get applied because it did not match {r}".format(c=new, r=cname_domain))    
-        return {'status': "Name {n} invalid".format(n=new)}
+                logger.error("Hostname {host} did not get applied because it did not match {r}".format(host=hostname, r=host_domain))    
+            return {'status': "Applied hosts: {hosts}".format(hosts=applied_hosts)}    
+        else:
+            logger.error("CNAME {c} did not get applied because it did not match {r}".format(c=new, r=cname_domain))    
+            return {'status': "Name {n} invalid".format(n=new)}
 
-@kopf.on.update(kind='Ingress', annotations={'cname': kopf.PRESENT})
+@kopf.on.update(kind='Ingress', annotations={'cnames': kopf.PRESENT})
 async def update_with_annotations_present(logger, old, new, **kwargs):
     logger.info("Old: {v}".format(v=old))
     logger.info("New: {v}".format(v=new))
 
-    cname_new=new['metadata']['annotations']['cname']
+    cnames_new=new['metadata']['annotations']['cnames']
+    tuples_new=get_cnames(logger, cnames_new)
     hosts_old = []
     hosts = []
-    if ( "metadata" in old) and ("annotations" in old['metadata']) and ("cname" in old['metadata']['annotations']):
+    if ( "metadata" in old) and ("annotations" in old['metadata']) and ("cnames" in old['metadata']['annotations']):
         # old exists: remove the old CNAME
-        cname_old=old['metadata']['annotations']['cname']
-        logger.info("Ingress was updated with a new value of the cname annotation. old value is {o}, new value is {n}".format(
-                o=cname_old,
-                n=cname_new))
+        cnames_old=old['metadata']['annotations']['cnames']
+        #tuples_old=get_cnames(logger, cnames_old)
+        logger.info("Ingress was updated with a new value of the cnames annotation. old value is {o}, new value is {n}".format(
+                o=cnames_old,
+                n=cnames_new))
         hosts_old = get_hosts_from_ingress(old, logger)
         hosts = get_hosts_from_ingress(new, logger)
 
     else:
         # annotation was just added
-        logger.info("Ingress was added the cname annotation: {n}".format(n=cname_new))
+        logger.info("Ingress was added the cname annotation: {n}".format(n=cnames_new))
         hosts = get_hosts_from_ingress(new, logger)
 
-    if check_if_cname_valid(cname_new, logger):
-        # hosts may have changed: we need to diff them    
-        # remove all cnames from hosts_old that are not in hosts, if any
-        for entry in hosts_old:
-            if entry not in hosts:
-                # remove
-                delete_cname(logger=logger, host=entry)
-        
-        # update all left cnames
-        for entry in hosts:
-            if check_if_host_valid(entry, logger):
-                # update
-                create_or_update_cname(logger=logger, host=entry, cname=cname_new)
-    else:
-        # set error
-        logger.error("The cname {c} is invalid".format(c=cname_new))
+    # clean-up all hostname that are not present anymore
+    for entry in hosts_old:
+        if entry not in hosts:
+            # remove
+            delete_cname(logger=logger, host=entry)
+
+    # create / update all new cnames as long as valid
+    for hostname in tuples_new:
+        if check_if_cname_valid(tuples_new[hostname], logger):
+            if check_if_host_valid(hostname, logger):
+                if hostname in hosts:
+                    # update
+                    create_or_update_cname(logger=logger, host=hostname, cname=tuples_new[hostname])
+                else:
+                    logger.error("Hostname {h} is not in {hs}".format(h=hostname, hs=hosts))    
+        else:
+            # set error
+            # we need to clean the hostname if the new cname is invalid
+            delete_cname(logger=logger, host=hostname)
+            logger.error("The cname {c} is invalid".format(c=tuples_new[hostname]))
          
         
 
 
-@kopf.on.update(kind='Ingress', annotations={'cname': kopf.ABSENT})
+@kopf.on.update(kind='Ingress', annotations={'cnames': kopf.ABSENT})
 async def update_with_annotations_removed(logger, old, new, **kwargs):
     logger.info("Annotation was removed from ingress.")
     logger.info("Old: {v}".format(v=old))
@@ -180,7 +208,7 @@ async def update_with_annotations_removed(logger, old, new, **kwargs):
 
 #    delete_cname(logger, host)
 
-@kopf.on.delete(kind='Ingress', annotations={'cname': kopf.PRESENT})
+@kopf.on.delete(kind='Ingress', annotations={'cnames': kopf.PRESENT})
 async def delete_with_annotations_present(logger, spec, **kwargs):
     logger.info("Ingress was deleted.")
     logger.info("Old: {v}".format(v=spec))
